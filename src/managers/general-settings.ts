@@ -216,8 +216,9 @@ export function initializeGeneralSettings(): void {
 		initializeBetaFeaturesToggle();
 		initializeLegacyModeToggle();
 		initializeSilentOpenToggle();
+		initializeSavedPageIndicatorToggle();
+		initializeSavedPageFaviconToggle();
 		initializeVaultInput();
-		initializeOpenBehaviorDropdown();
 		initializeKeyboardShortcuts();
 		initializeToggles();
 		setShortcutInstructions();
@@ -226,7 +227,6 @@ export function initializeGeneralSettings(): void {
 		initializeExportImportAllSettingsButtons();
 		initializeHighlighterSettings();
 		initializeExportHighlightsButton();
-		initializeSaveBehaviorDropdown();
 		await initializeUsageChart();
 
 		// Initialize feedback modal close button
@@ -253,6 +253,8 @@ function saveSettingsFromForm(): void {
 	const betaFeaturesToggle = document.getElementById('beta-features-toggle') as HTMLInputElement;
 	const legacyModeToggle = document.getElementById('legacy-mode-toggle') as HTMLInputElement;
 	const silentOpenToggle = document.getElementById('silent-open-toggle') as HTMLInputElement;
+	const savedPageIndicatorToggle = document.getElementById('saved-page-indicator-toggle') as HTMLInputElement;
+	const savedPageFaviconToggle = document.getElementById('saved-page-favicon-toggle') as HTMLInputElement;
 	const highlighterToggle = document.getElementById('highlighter-toggle') as HTMLInputElement;
 	const alwaysShowHighlightsToggle = document.getElementById('highlighter-visibility') as HTMLInputElement;
 	const highlightBehaviorSelect = document.getElementById('highlighter-behavior') as HTMLSelectElement;
@@ -264,9 +266,11 @@ function saveSettingsFromForm(): void {
 		betaFeatures: betaFeaturesToggle?.checked ?? generalSettings.betaFeatures,
 		legacyMode: legacyModeToggle?.checked ?? generalSettings.legacyMode,
 		silentOpen: silentOpenToggle?.checked ?? generalSettings.silentOpen,
+		showSavedPageIndicator: savedPageIndicatorToggle?.checked ?? generalSettings.showSavedPageIndicator,
+		changeSavedPageFavicon: savedPageFaviconToggle?.checked ?? generalSettings.changeSavedPageFavicon,
 		highlighterEnabled: highlighterToggle?.checked ?? generalSettings.highlighterEnabled,
 		alwaysShowHighlights: alwaysShowHighlightsToggle?.checked ?? generalSettings.alwaysShowHighlights,
-		highlightBehavior: highlightBehaviorSelect?.value ?? generalSettings.highlightBehavior
+		highlightBehavior: highlightBehaviorSelect?.value ?? generalSettings.highlightBehavior,
 	};
 
 	saveSettings(updatedSettings);
@@ -344,6 +348,18 @@ function initializeSilentOpenToggle(): void {
 	});
 }
 
+function initializeSavedPageIndicatorToggle(): void {
+	initializeSettingToggle('saved-page-indicator-toggle', generalSettings.showSavedPageIndicator, (checked) => {
+		saveSettings({ ...generalSettings, showSavedPageIndicator: checked });
+	});
+}
+
+function initializeSavedPageFaviconToggle(): void {
+	initializeSettingToggle('saved-page-favicon-toggle', generalSettings.changeSavedPageFavicon, (checked) => {
+		saveSettings({ ...generalSettings, changeSavedPageFavicon: checked });
+	});
+}
+
 function initializeOpenBehaviorDropdown(): void {
 	initializeSettingDropdown(
 		'open-behavior-dropdown',
@@ -359,17 +375,6 @@ function initializeResetDefaultTemplateButton(): void {
 	if (resetDefaultTemplateBtn) {
 		resetDefaultTemplateBtn.addEventListener('click', resetDefaultTemplate);
 	}
-}
-
-function initializeSaveBehaviorDropdown(): void {
-    const dropdown = document.getElementById('save-behavior-dropdown') as HTMLSelectElement;
-    if (!dropdown) return;
-
-    dropdown.value = generalSettings.saveBehavior;
-    dropdown.addEventListener('change', () => {
-        const newValue = dropdown.value as 'addToObsidian' | 'copyToClipboard' | 'saveFile';
-        saveSettings({ saveBehavior: newValue });
-    });
 }
 
 export function resetDefaultTemplate(): void {

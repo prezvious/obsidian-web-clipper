@@ -1,15 +1,18 @@
 import browser from './browser-polyfill';
-import { Settings, ModelConfig, PropertyType, HistoryEntry, Provider, Rating } from '../types/types';
+import { Settings, ModelConfig, PropertyType, HistoryEntry, Provider, Rating, SavedClipRecord, SavedClipsMap } from '../types/types';
 import { debugLog } from './debug';
 import { copyToClipboard } from 'core/popup';
+import { buildSavedClipRecord, normalizeClipUrl, SavedClipRecordInput } from './saved-clips';
 
-export type { Settings, ModelConfig, PropertyType, HistoryEntry, Provider, Rating };
+export type { Settings, ModelConfig, PropertyType, HistoryEntry, Provider, Rating, SavedClipRecord, SavedClipsMap };
 
 export let generalSettings: Settings = {
 	vaults: [],
 	betaFeatures: false,
 	legacyMode: false,
 	silentOpen: false,
+	showSavedPageIndicator: true,
+	changeSavedPageFavicon: true,
 	openBehavior: 'popup',
 	highlighterEnabled: true,
 	alwaysShowHighlights: false,
@@ -64,6 +67,8 @@ interface StorageData {
 		betaFeatures?: boolean;
 		legacyMode?: boolean;
 		silentOpen?: boolean;
+		showSavedPageIndicator?: boolean;
+		changeSavedPageFavicon?: boolean;
 		openBehavior?: boolean | 'popup' | 'embedded';
 		saveBehavior?: 'addToObsidian' | 'copyToClipboard' | 'saveFile';
 	};
@@ -110,7 +115,7 @@ interface StorageData {
 	migrationVersion?: number;
 }
 
-const CURRENT_MIGRATION_VERSION = 1;
+const CURRENT_MIGRATION_VERSION = 2;
 
 export async function loadSettings(): Promise<Settings> {
 	const data = await browser.storage.sync.get(null) as StorageData;
@@ -122,6 +127,8 @@ export async function loadSettings(): Promise<Settings> {
 		betaFeatures: false,
 		legacyMode: false,
 		silentOpen: false,
+		showSavedPageIndicator: true,
+		changeSavedPageFavicon: true,
 		openBehavior: 'popup',
 		highlighterEnabled: true,
 		alwaysShowHighlights: true,
@@ -161,9 +168,18 @@ export async function loadSettings(): Promise<Settings> {
 		ratings: [],
 	};
 
+	const previousMigrationVersion = data.migrationVersion || 0;
+	const migratedGeneralSettings = { ...(data.general_settings || {}) };
+	if (previousMigrationVersion < 2 && migratedGeneralSettings.saveBehavior === 'saveFile') {
+		migratedGeneralSettings.saveBehavior = 'addToObsidian';
+	}
+
 	// Update migration version if needed
-	if (!data.migrationVersion || data.migrationVersion < CURRENT_MIGRATION_VERSION) {
-		await browser.storage.sync.set({ migrationVersion: CURRENT_MIGRATION_VERSION });
+	if (previousMigrationVersion < CURRENT_MIGRATION_VERSION) {
+		await browser.storage.sync.set({
+			migrationVersion: CURRENT_MIGRATION_VERSION,
+			general_settings: migratedGeneralSettings
+		});
 		debugLog('Settings', `Updated migration version to ${CURRENT_MIGRATION_VERSION}`);
 	}
 
@@ -179,13 +195,15 @@ export async function loadSettings(): Promise<Settings> {
 	// Load user settings
 	const loadedSettings: Settings = {
 		vaults: sanitizedVaults.length > 0 ? sanitizedVaults : defaultSettings.vaults,
-		showMoreActionsButton: data.general_settings?.showMoreActionsButton ?? defaultSettings.showMoreActionsButton,
-		betaFeatures: data.general_settings?.betaFeatures ?? defaultSettings.betaFeatures,
-		legacyMode: data.general_settings?.legacyMode ?? defaultSettings.legacyMode,
-		silentOpen: data.general_settings?.silentOpen ?? defaultSettings.silentOpen,
-		openBehavior: typeof data.general_settings?.openBehavior === 'boolean' 
-			? (data.general_settings.openBehavior ? 'embedded' : 'popup') 
-			: (data.general_settings?.openBehavior ?? defaultSettings.openBehavior),
+		showMoreActionsButton: migratedGeneralSettings.showMoreActionsButton ?? defaultSettings.showMoreActionsButton,
+		betaFeatures: migratedGeneralSettings.betaFeatures ?? defaultSettings.betaFeatures,
+		legacyMode: migratedGeneralSettings.legacyMode ?? defaultSettings.legacyMode,
+		silentOpen: migratedGeneralSettings.silentOpen ?? defaultSettings.silentOpen,
+		showSavedPageIndicator: migratedGeneralSettings.showSavedPageIndicator ?? defaultSettings.showSavedPageIndicator,
+		changeSavedPageFavicon: migratedGeneralSettings.changeSavedPageFavicon ?? defaultSettings.changeSavedPageFavicon,
+		openBehavior: typeof migratedGeneralSettings.openBehavior === 'boolean'
+			? (migratedGeneralSettings.openBehavior ? 'embedded' : 'popup')
+			: (migratedGeneralSettings.openBehavior ?? defaultSettings.openBehavior),
 		highlighterEnabled: data.highlighter_settings?.highlighterEnabled ?? defaultSettings.highlighterEnabled,
 		alwaysShowHighlights: data.highlighter_settings?.alwaysShowHighlights ?? defaultSettings.alwaysShowHighlights,
 		highlightBehavior: data.highlighter_settings?.highlightBehavior ?? defaultSettings.highlightBehavior,
@@ -216,7 +234,7 @@ export async function loadSettings(): Promise<Settings> {
 		stats: data.stats || defaultSettings.stats,
 		history: data.history || defaultSettings.history,
 		ratings: data.ratings || defaultSettings.ratings,
-		saveBehavior: data.general_settings?.saveBehavior ?? defaultSettings.saveBehavior
+		saveBehavior: migratedGeneralSettings.saveBehavior ?? defaultSettings.saveBehavior
 	};
 
 	generalSettings = loadedSettings;
@@ -236,6 +254,8 @@ export async function saveSettings(settings?: Partial<Settings>): Promise<void> 
 			betaFeatures: generalSettings.betaFeatures,
 			legacyMode: generalSettings.legacyMode,
 			silentOpen: generalSettings.silentOpen,
+			showSavedPageIndicator: generalSettings.showSavedPageIndicator,
+			changeSavedPageFavicon: generalSettings.changeSavedPageFavicon,
 			openBehavior: generalSettings.openBehavior,
 			saveBehavior: generalSettings.saveBehavior,
 		},
@@ -329,6 +349,69 @@ export async function addHistoryEntry(
 export async function getClipHistory(): Promise<HistoryEntry[]> {
 	const result = await browser.storage.local.get('history');
 	return (result.history || []) as HistoryEntry[];
+}
+
+export async function getSavedClips(): Promise<SavedClipsMap> {
+	const result = await browser.storage.local.get('savedClips');
+	return (result.savedClips || {}) as SavedClipsMap;
+}
+
+export async function getSavedClip(url: string): Promise<SavedClipRecord | null> {
+	const savedClips = await getSavedClips();
+	return savedClips[normalizeClipUrl(url)] || null;
+}
+
+export async function getDownloadedClip(url: string): Promise<SavedClipRecord | null> {
+	const record = await getSavedClip(url);
+	return record?.kind === 'download' ? record : null;
+}
+
+export async function saveSavedClip(input: SavedClipRecordInput): Promise<SavedClipRecord> {
+	const savedClips = await getSavedClips();
+	const normalizedUrl = normalizeClipUrl(input.url);
+	const record = buildSavedClipRecord(input, savedClips[normalizedUrl]);
+	savedClips[normalizedUrl] = record;
+	await browser.storage.local.set({ savedClips });
+	return record;
+}
+
+export async function recordDownloadedClip(input: SavedClipRecordInput): Promise<SavedClipRecord> {
+	return saveSavedClip({ ...input, kind: 'download' });
+}
+
+export async function hasDownloadedClip(url: string): Promise<boolean> {
+	if (await getDownloadedClip(url)) return true;
+	return Boolean(await findLegacyDuplicateHistory(url));
+}
+
+export async function mergeSavedClipHighlightIds(url: string, highlightIds: string[]): Promise<SavedClipRecord | null> {
+	const savedClips = await getSavedClips();
+	const normalizedUrl = normalizeClipUrl(url);
+	const previous = savedClips[normalizedUrl];
+	if (!previous) return null;
+
+	const record = buildSavedClipRecord({
+		url: previous.url,
+		title: previous.title,
+		vault: previous.vault,
+		path: previous.path,
+		noteName: previous.noteName,
+		noteFile: previous.noteFile,
+		templateId: previous.templateId,
+		templateName: previous.templateName,
+		behavior: previous.behavior,
+		savedHighlightIds: highlightIds,
+		openUri: previous.openUri,
+	}, previous);
+	savedClips[normalizedUrl] = record;
+	await browser.storage.local.set({ savedClips });
+	return record;
+}
+
+export async function findLegacyDuplicateHistory(url: string): Promise<HistoryEntry | null> {
+	const normalizedUrl = normalizeClipUrl(url);
+	const history = await getClipHistory();
+	return history.find(entry => (entry.action === 'addToObsidian' || entry.action === 'saveFile') && normalizeClipUrl(entry.url) === normalizedUrl) || null;
 }
 
 declare global {

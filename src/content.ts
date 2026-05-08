@@ -4,11 +4,10 @@ import { removeExistingHighlights } from './utils/highlighter-overlays';
 import { loadSettings, generalSettings } from './utils/storage-utils';
 import { getDomain } from './utils/string-utils';
 import { extractContentBySelector as extractContentBySelectorShared } from './utils/shared';
-import Defuddle from 'defuddle';
+import Defuddle from 'defuddle/full';
 import { createMarkdownContent } from 'defuddle/full';
 import { flattenShadowDom } from './utils/flatten-shadow-dom';
 import { serializeChildren } from './utils/dom-utils';
-import { saveFile } from './utils/file-utils';
 import { debugLog } from './utils/debug';
 import { updateSidebarWidth, addResizeHandle, cleanupResizeHandlers } from './utils/iframe-resize';
 import { parseForClip } from './utils/clip-utils';
@@ -33,6 +32,161 @@ declare global {
 	let isHighlighterMode = false;
 	const iframeId = 'obsidian-clipper-iframe';
 	const containerId = 'obsidian-clipper-container';
+	const toastId = 'obsidian-clipper-status-toast';
+	const chipId = 'obsidian-clipper-saved-chip';
+	const faviconId = 'obsidian-clipper-status-favicon';
+	let activeFaviconStatus: 'none' | 'saved' | 'duplicate' | 'failed' = 'none';
+	let lastStableFaviconStatus: 'none' | 'saved' | 'duplicate' = 'none';
+	let faviconEnabled = true;
+	let faviconObserver: MutationObserver | null = null;
+
+	function statusFaviconSvg(status: 'saved' | 'duplicate' | 'failed'): string {
+		if (status === 'saved') {
+			return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="7" fill="#2f9e44"/><path d="M8.5 16.4 13.7 21.5 23.7 10.5" fill="none" stroke="#fff" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+		}
+		if (status === 'duplicate') {
+			return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><path d="M16 3 30 28H2Z" fill="#f59f00"/><path d="M16 11v8" stroke="#1f1300" stroke-width="3.5" stroke-linecap="round"/><circle cx="16" cy="24" r="1.8" fill="#1f1300"/></svg>`;
+		}
+		return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="7" fill="#e03131"/><path d="m10 10 12 12M22 10 10 22" stroke="#fff" stroke-width="4" stroke-linecap="round"/></svg>`;
+	}
+
+	function ensureFaviconObserver(): void {
+		if (faviconObserver || !document.head) return;
+		faviconObserver = new MutationObserver(() => {
+			if (activeFaviconStatus !== 'none' && faviconEnabled) {
+				applyStatusFavicon(activeFaviconStatus);
+			}
+		});
+		faviconObserver.observe(document.head, { childList: true });
+	}
+
+	function applyStatusFavicon(status: 'none' | 'saved' | 'duplicate' | 'failed'): void {
+		activeFaviconStatus = status;
+		const existing = document.getElementById(faviconId);
+		if (!faviconEnabled || status === 'none') {
+			existing?.remove();
+			return;
+		}
+
+		ensureFaviconObserver();
+		const link = (existing || document.createElement('link')) as HTMLLinkElement;
+		link.id = faviconId;
+		link.rel = 'icon';
+		link.type = 'image/svg+xml';
+		link.href = `data:image/svg+xml,${encodeURIComponent(statusFaviconSvg(status))}`;
+		if (!existing) document.head.appendChild(link);
+	}
+
+	function getToastText(status: 'saved' | 'duplicate' | 'failed', savedClip?: any): { title: string; detail: string } {
+		const filename = savedClip?.filename || savedClip?.noteFile || '';
+		const timestamp = savedClip?.lastSavedAt || savedClip?.downloadedAt || savedClip?.firstSavedAt;
+		const savedAt = timestamp ? new Date(timestamp).toLocaleString() : '';
+		const detail = [filename, savedAt ? `Downloaded ${savedAt}` : ''].filter(Boolean).join(' - ');
+		if (status === 'saved') return { title: 'Downloaded', detail };
+		if (status === 'duplicate') return { title: 'Already downloaded', detail: detail || 'This page was already downloaded from this browser profile.' };
+		return { title: 'Download failed', detail: 'Web Clipper could not download Markdown for this page.' };
+	}
+
+	function showStatusToast(status: 'saved' | 'duplicate' | 'failed', savedClip?: any): void {
+		const existing = document.getElementById(toastId);
+		existing?.remove();
+
+		const toast = document.createElement('div');
+		toast.id = toastId;
+		toast.className = `obsidian-clipper-toast is-${status}`;
+		const text = getToastText(status, savedClip);
+
+		const title = document.createElement('div');
+		title.className = 'obsidian-clipper-toast-title';
+		title.textContent = text.title;
+		toast.appendChild(title);
+
+		if (text.detail) {
+			const detail = document.createElement('div');
+			detail.className = 'obsidian-clipper-toast-detail';
+			detail.textContent = text.detail;
+			toast.appendChild(detail);
+		}
+
+		const actions = document.createElement('div');
+		actions.className = 'obsidian-clipper-toast-actions';
+		const dismissButton = document.createElement('button');
+		dismissButton.type = 'button';
+		dismissButton.textContent = 'Dismiss';
+		dismissButton.addEventListener('click', () => toast.remove());
+		actions.appendChild(dismissButton);
+		toast.appendChild(actions);
+
+		document.documentElement.appendChild(toast);
+		requestAnimationFrame(() => toast.classList.add('is-visible'));
+	}
+
+	function updateSavedChip(status: 'none' | 'saved' | 'duplicate' | 'failed', showIndicator: boolean, savedClip?: any): void {
+		const existing = document.getElementById(chipId);
+		if (!showIndicator || (status !== 'saved' && status !== 'duplicate')) {
+			existing?.remove();
+			return;
+		}
+
+		const chip = (existing || document.createElement('button')) as HTMLButtonElement;
+		chip.id = chipId;
+		chip.className = `obsidian-clipper-saved-chip is-${status}`;
+		chip.type = 'button';
+		chip.textContent = status === 'duplicate' ? 'Downloaded !' : 'Downloaded';
+		chip.onclick = () => showStatusToast(status, savedClip);
+		if (!existing) document.documentElement.appendChild(chip);
+	}
+
+	function applyClipPageIndicator(request: any): void {
+		let status = request.status as 'none' | 'saved' | 'duplicate' | 'failed';
+		const savedClip = request.savedClip;
+		faviconEnabled = request.changeSavedPageFavicon !== false;
+		if (status === 'none') {
+			document.getElementById(toastId)?.remove();
+		}
+		updateSavedChip(status, request.showSavedPageIndicator !== false, savedClip);
+
+		if (status === 'failed') {
+			applyStatusFavicon('failed');
+			if (request.showToast !== false) showStatusToast('failed', savedClip);
+			window.setTimeout(() => applyStatusFavicon(lastStableFaviconStatus), 8000);
+			return;
+		}
+
+		lastStableFaviconStatus = status === 'duplicate' ? 'duplicate' : status === 'saved' ? 'saved' : 'none';
+		applyStatusFavicon(lastStableFaviconStatus);
+		if (request.showToast && (status === 'saved' || status === 'duplicate')) {
+			showStatusToast(status, savedClip);
+		}
+	}
+
+	function notifyClipperUrlChanged(): void {
+		browser.runtime.sendMessage({ action: 'clipperUrlChanged', url: location.href }).catch(() => undefined);
+	}
+
+	function watchSpaUrlChanges(): void {
+		let lastUrl = location.href;
+		const checkUrl = () => {
+			if (location.href === lastUrl) return;
+			lastUrl = location.href;
+			notifyClipperUrlChanged();
+		};
+
+		const originalPushState = history.pushState;
+		const originalReplaceState = history.replaceState;
+		history.pushState = function(data: any, unused: string, url?: string | URL | null) {
+			const result = originalPushState.call(this, data, unused, url);
+			window.setTimeout(checkUrl, 0);
+			return result;
+		};
+		history.replaceState = function(data: any, unused: string, url?: string | URL | null) {
+			const result = originalReplaceState.call(this, data, unused, url);
+			window.setTimeout(checkUrl, 0);
+			return result;
+		};
+		window.addEventListener('popstate', checkUrl);
+		window.addEventListener('hashchange', checkUrl);
+	}
 
 	function removeContainer(container: HTMLElement) {
 		container.classList.add('is-closing');
@@ -108,6 +262,131 @@ declare global {
 		metaTags: { name?: string | null; property?: string | null; content: string | null }[];
 	}
 
+	interface DefuddleProxyResponse {
+		success?: boolean;
+		status: number;
+		statusText: string;
+		headers: Record<string, string>;
+		body: string;
+		error?: string;
+	}
+
+	function headersToObject(headers: HeadersInit | undefined): Record<string, string> {
+		if (!headers) return {};
+		if (headers instanceof Headers) {
+			const result: Record<string, string> = {};
+			headers.forEach((value, key) => {
+				result[key] = value;
+			});
+			return result;
+		}
+		if (Array.isArray(headers)) {
+			const result: Record<string, string> = {};
+			headers.forEach(([key, value]) => {
+				result[key] = String(value);
+			});
+			return result;
+		}
+		const result: Record<string, string> = {};
+		Object.entries(headers).forEach(([key, value]) => {
+			result[key] = String(value);
+		});
+		return result;
+	}
+
+	async function serializeBody(body: BodyInit | null | undefined): Promise<string | undefined> {
+		if (body === undefined || body === null) return undefined;
+		if (typeof body === 'string') return body;
+		if (body instanceof URLSearchParams) return body.toString();
+		if (body instanceof Blob) return body.text();
+		if (body instanceof ArrayBuffer) {
+			return new TextDecoder().decode(body);
+		}
+		return String(body);
+	}
+
+	async function proxyFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
+		const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+		if (!url) {
+			throw new Error('Missing URL.');
+		}
+
+		const response = await browser.runtime.sendMessage({
+			action: 'defuddleProxyFetch',
+			url,
+			init: {
+				method: init.method || 'GET',
+				headers: headersToObject(init.headers),
+				body: await serializeBody(init.body),
+			},
+		}) as DefuddleProxyResponse;
+
+		if (!response || response.success === false) {
+			throw new Error(response?.error || 'Extension fetch failed.');
+		}
+
+		return new Response(response.body || '', {
+			status: response.status,
+			statusText: response.statusText,
+			headers: response.headers,
+		});
+	}
+
+	function getDownloadName(result: { title?: string }, sourceUrl: string): string {
+		let name = result.title || '';
+		if (!name) {
+			try {
+				const parsed = new URL(sourceUrl);
+				name = `${parsed.hostname}${parsed.pathname.replace(/\/$/, '')}`;
+			} catch {
+				name = 'clipping';
+			}
+		}
+
+		name = name
+			.replace(/&quot;/g, '')
+			.replace(/[^a-z0-9]+/gi, '-')
+			.replace(/^-+|-+$/g, '')
+			.slice(0, 80);
+
+		return `${name || 'clipping'}.md`;
+	}
+
+	async function extractMarkdownForDownload(): Promise<{ markdown: string; filename: string; title?: string }> {
+		const flattenTimeout = new Promise<void>(resolve => setTimeout(resolve, 3000));
+		await Promise.race([flattenShadowDom(document), flattenTimeout]);
+
+		const snapshot = document.cloneNode(true) as Document;
+		try {
+			Object.defineProperty(snapshot, 'URL', {
+				value: document.URL,
+				configurable: true,
+			});
+		} catch {}
+
+		const defuddle = new Defuddle(snapshot, {
+			url: document.URL,
+			markdown: true,
+			fetch: proxyFetch,
+		});
+		const parseTimeout = new Promise<never>((_, reject) =>
+			setTimeout(() => reject(new Error('parseAsync timeout')), 10000)
+		);
+		const result = await Promise.race([defuddle.parseAsync(), parseTimeout])
+			.catch(() => defuddle.parse());
+		const markdown = ((result as { contentMarkdown?: string }).contentMarkdown || result.content || '').trim();
+
+		if (!markdown) {
+			throw new Error('No readable content was extracted from this tab.');
+		}
+
+		return {
+			markdown: `${markdown}\n`,
+			filename: getDownloadName(result, document.URL),
+			title: result.title || document.title,
+		};
+	}
+
 	browser.runtime.onMessage.addListener((request: any, sender, sendResponse) => {
 		// If a newer generation of this content script has been injected,
 		// yield to it rather than responding from a potentially stale context.
@@ -117,6 +396,14 @@ declare global {
 
 		if (request.action === "ping") {
 			sendResponse({});
+			return true;
+		}
+
+		if (request.action === "setClipPageIndicator") {
+			ensureHighlighterCSS().then(() => {
+				applyClipPageIndicator(request);
+				sendResponse({ success: true });
+			});
 			return true;
 		}
 
@@ -175,18 +462,31 @@ declare global {
 			return true;
 		}
 
-		if (request.action === "saveMarkdownToFile") {
-			flattenShadowDom(document).then(async () => {
+		if (request.action === "extractMarkdownForDownload") {
+			Promise.resolve().then(async () => {
 				try {
-					const defuddled = parseForClip(document);
-					const markdown = createMarkdownContent(defuddled.content, document.URL);
-					const title = defuddled.title || document.title || 'Untitled';
-					const fileName = title.replace(/[/\\?%*:|"<>]/g, '-');
-					await saveFile({
-						content: markdown,
-						fileName,
-						mimeType: 'text/markdown',
-					});
+					const result = await extractMarkdownForDownload();
+					sendResponse({ success: true, ...result });
+				} catch (err) {
+					console.error('Failed to extract markdown file:', err);
+					sendResponse({ success: false, error: (err as Error).message });
+				}
+			});
+			return true;
+		}
+
+		if (request.action === "saveMarkdownToFile") {
+			Promise.resolve().then(async () => {
+				try {
+					const { markdown, filename } = await extractMarkdownForDownload();
+					const downloadResponse = await browser.runtime.sendMessage({
+						action: 'downloadMarkdown',
+						markdown,
+						filename,
+					}) as { success?: boolean; error?: string };
+					if (!downloadResponse?.success) {
+						throw new Error(downloadResponse?.error || 'Download failed.');
+					}
 					sendResponse({ success: true });
 				} catch (err) {
 					console.error('Failed to save markdown file:', err);
@@ -465,6 +765,7 @@ declare global {
 
 	// Call updateHasHighlights when the page loads
 	window.addEventListener('load', updateHasHighlights);
+	watchSpaUrlChanges();
 
 	// Deactivate highlighter mode on unload
 	function handlePageUnload() {

@@ -212,7 +212,7 @@ export function showTemplateEditor(template: Template | null): void {
 
 	refreshPropertyNameSuggestions();
 
-	if (editingTemplate && Array.isArray(editingTemplate.properties)) {
+	if (templateProperties && editingTemplate && Array.isArray(editingTemplate.properties)) {
 		editingTemplate.properties.forEach(property => addPropertyToEditor(property.name, property.value, property.id));
 	}
 
@@ -296,8 +296,6 @@ function updateBehaviorFields(): void {
 export function addPropertyToEditor(name: string = '', value: string = '', id: string | null = null): HTMLElement {
 	const templateProperties = document.getElementById('template-properties');
 	if (!templateProperties) {
-		console.error('Template properties container not found');
-		// Return a dummy element to satisfy the return type
 		return document.createElement('div');
 	}
 
@@ -568,8 +566,6 @@ export function initializeAddPropertyButton(): void {
 	if (addPropertyBtn) {
 		addPropertyBtn.removeEventListener('click', handleAddProperty);
 		addPropertyBtn.addEventListener('click', handleAddProperty);
-	} else {
-		console.error('Add property button not found');
 	}
 }
 

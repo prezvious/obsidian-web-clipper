@@ -20,6 +20,12 @@
 	"addToObsidian": {
 		"message": "Add to Obsidian"
 	},
+	"openNote": {
+		"message": "Open note"
+	},
+	"saveCopy": {
+		"message": "Save copy"
+	},
 	"addVaultPlaceholder": {
 		"message": "Press enter to add a vault"
 	},
@@ -118,10 +124,10 @@
 		"message": "Close"
 	},
 	"commandOpenClipper": {
-		"message": "Open Obsidian Clipper"
+		"message": "Download page as Markdown"
 	},
 	"commandQuickClip": {
-		"message": "Quick clip"
+		"message": "Quick Markdown download"
 	},
 	"commandToggleHighlighter": {
 		"message": "Toggle highlighter"

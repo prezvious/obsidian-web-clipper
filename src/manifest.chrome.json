@@ -7,10 +7,9 @@
 	"description": "Save and highlight web pages in a private and durable format that you can access offline. The official extension for Obsidian.",
 	"permissions": [
 		"activeTab",
-		"clipboardWrite",
 		"commands",
 		"contextMenus",
-		"sidePanel",
+		"downloads",
 		"storage",
 		"scripting",
 		"declarativeNetRequest"
@@ -21,10 +20,6 @@
 		"https://*/*"
 	],
 	"action": {
-		"default_popup": "popup.html"
-	},
-	"side_panel": {
-		"default_path": "side-panel.html"
 	},
 	"options_ui": {
 		"page": "settings.html",

@@ -5,6 +5,18 @@ import { Template, Property } from '../types/types';
 import { generalSettings, incrementStat } from './storage-utils';
 import { copyToClipboard } from './clipboard-utils';
 import { getMessage } from './i18n';
+import { buildNoteFile, buildOpenNoteUri, isDailyBehavior, normalizeNotePath } from './saved-clips';
+
+export interface SaveToObsidianResult {
+	status: 'sent';
+	vault: string;
+	path: string;
+	noteName: string;
+	noteFile: string;
+	behavior: Template['behavior'];
+	openUri: string;
+	saveUri: string;
+}
 
 export async function generateFrontmatter(properties: Property[]): Promise<string> {
 	const typeMap: Record<string, string> = {};
@@ -14,33 +26,38 @@ export async function generateFrontmatter(properties: Property[]): Promise<strin
 	return generateFrontmatterCore(properties, typeMap);
 }
 
-function openObsidianUrl(url: string): void {
-	browser.runtime.sendMessage({
+export async function openObsidianUrl(url: string): Promise<boolean> {
+	try {
+		const response = await browser.runtime.sendMessage({
 		action: "openObsidianUrl",
 		url: url
-	}).catch((error) => {
+		}) as { success?: boolean };
+		return response?.success !== false;
+	} catch (error) {
 		console.error('Error opening Obsidian URL via background script:', error);
 		window.open(url, '_blank');
-	});
+		return true;
+	}
 }
 
-async function tryClipboardWrite(fileContent: string, obsidianUrl: string): Promise<void> {
+async function tryClipboardWrite(fileContent: string, obsidianUrl: string): Promise<string> {
 	const success = await copyToClipboard(fileContent);
 	
 	if (success) {
 		// &clipboard tells Obsidian to read data from clipboard instead of the content param.
 		// content is a fallback shown only if Obsidian can't access the clipboard (e.g. on Linux).
 		obsidianUrl += `&clipboard&content=${encodeURIComponent(getMessage('clipboardError', 'https://help.obsidian.md/web-clipper/troubleshoot'))}`;
-		openObsidianUrl(obsidianUrl);
+		if (!await openObsidianUrl(obsidianUrl)) throw new Error('Failed to open Obsidian URL');
 		console.log('Obsidian URL:', obsidianUrl);
 	} else {
 		console.error('All clipboard methods failed, falling back to URI method');
 		// Final fallback: use URI method with actual content (same as legacy mode)
 		// Note: We don't add &clipboard here since we're bypassing the clipboard entirely
 		obsidianUrl += `&content=${encodeURIComponent(fileContent)}`;
-		openObsidianUrl(obsidianUrl);
+		if (!await openObsidianUrl(obsidianUrl)) throw new Error('Failed to open Obsidian URL');
 		console.log('Obsidian URL (URI fallback):', obsidianUrl);
 	}
+	return obsidianUrl;
 }
 
 export async function saveToObsidian(
@@ -49,21 +66,18 @@ export async function saveToObsidian(
 	path: string,
 	vault: string,
 	behavior: Template['behavior'],
-): Promise<void> {
+): Promise<SaveToObsidianResult> {
 	let obsidianUrl: string;
 
-	const isDailyNote = behavior === 'append-daily' || behavior === 'prepend-daily';
+	const isDailyNote = isDailyBehavior(behavior);
+	const originalPath = path;
+	const noteFile = buildNoteFile(path, noteName, behavior);
 
 	if (isDailyNote) {
 		obsidianUrl = `obsidian://daily?`;
 	} else {
-		// Ensure path ends with a slash
-		if (path && !path.endsWith('/')) {
-			path += '/';
-		}
-
 		const formattedNoteName = sanitizeFileName(noteName);
-		obsidianUrl = `obsidian://new?file=${encodeURIComponent(path + formattedNoteName)}`;
+		obsidianUrl = `obsidian://new?file=${encodeURIComponent(normalizeNotePath(path) + formattedNoteName)}`;
 	}
 
 	if (behavior.startsWith('append')) {
@@ -86,9 +100,24 @@ export async function saveToObsidian(
 		// Use the URI method
 		obsidianUrl += `&content=${encodeURIComponent(fileContent)}`;
 		console.log('Obsidian URL:', obsidianUrl);
-		openObsidianUrl(obsidianUrl);
+		if (!await openObsidianUrl(obsidianUrl)) throw new Error('Failed to open Obsidian URL');
 	} else {
 		// Try to copy to clipboard with fallback mechanisms
-		await tryClipboardWrite(fileContent, obsidianUrl);
+		obsidianUrl = await tryClipboardWrite(fileContent, obsidianUrl);
 	}
+
+	return {
+		status: 'sent',
+		vault,
+		path: isDailyNote ? '' : originalPath,
+		noteName: isDailyNote ? '' : noteName,
+		noteFile,
+		behavior,
+		openUri: buildOpenNoteUri(vault, noteFile, behavior),
+		saveUri: obsidianUrl,
+	};
+}
+
+export async function openSavedClip(openUri: string): Promise<boolean> {
+	return openObsidianUrl(openUri);
 }

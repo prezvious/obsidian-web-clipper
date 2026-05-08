@@ -1,7 +1,7 @@
 import dayjs from 'dayjs';
-import { Template, Property, PromptVariable } from '../types/types';
-import { incrementStat, addHistoryEntry, getClipHistory } from '../utils/storage-utils';
-import { generateFrontmatter, saveToObsidian } from '../utils/obsidian-note-creator';
+import { Template, Property, PromptVariable, SavedClipRecord, HistoryEntry } from '../types/types';
+import { incrementStat, addHistoryEntry, getClipHistory, getSavedClip, saveSavedClip, mergeSavedClipHighlightIds, findLegacyDuplicateHistory } from '../utils/storage-utils';
+import { generateFrontmatter, openSavedClip, SaveToObsidianResult, saveToObsidian } from '../utils/obsidian-note-creator';
 import { extractPageContent, initializePageContent } from '../utils/content-extractor';
 import { compileTemplate } from '../utils/template-compiler';
 import { initializeIcons, getPropertyTypeIcon } from '../icons/icons';
@@ -23,6 +23,8 @@ import { sanitizeFileName } from '../utils/string-utils';
 import { saveFile } from '../utils/file-utils';
 import { translatePage, getMessage, setupLanguageAndDirection } from '../utils/i18n';
 import { formatPropertyValue } from '../utils/shared';
+import type { AnyHighlightData } from '../utils/highlighter';
+import { buildHighlightAppendMarkdown, formatSavedClipTarget, getHighlightIds, getNewHighlights } from '../utils/saved-clips';
 
 interface ReaderModeResponse {
 	success: boolean;
@@ -35,6 +37,10 @@ let templates: Template[] = [];
 let currentVariables: { [key: string]: string } = {};
 let currentTabId: number | undefined;
 let lastSelectedVault: string | null = null;
+let currentHighlights: AnyHighlightData[] = [];
+let currentSavedClip: SavedClipRecord | null = null;
+let currentLegacyDuplicate: HistoryEntry | null = null;
+let successCloseTimer: number | undefined;
 
 const isSidePanel = window.location.pathname.includes('side-panel.html');
 const urlParams = new URLSearchParams(window.location.search);
@@ -629,6 +635,269 @@ function clearError(): void {
 	}
 }
 
+function createFeedbackButton(label: string, onClick: () => void | Promise<void>, isPrimary = false): HTMLButtonElement {
+	const button = document.createElement('button');
+	button.type = 'button';
+	button.textContent = label;
+	if (isPrimary) button.classList.add('mod-cta');
+	button.addEventListener('click', () => {
+		Promise.resolve(onClick()).catch((error) => {
+			console.error('Feedback action failed:', error);
+			showError('failedToSaveFile');
+		});
+	});
+	return button;
+}
+
+function setPanelContent(panel: HTMLElement, className: string, title: string, detail: string, actions: HTMLButtonElement[] = []): void {
+	panel.className = className;
+	panel.textContent = '';
+
+	const titleEl = document.createElement('div');
+	titleEl.className = 'clip-feedback-title';
+	titleEl.textContent = title;
+	panel.appendChild(titleEl);
+
+	if (detail) {
+		const detailEl = document.createElement('div');
+		detailEl.className = 'clip-feedback-detail';
+		detailEl.textContent = detail;
+		panel.appendChild(detailEl);
+	}
+
+	if (actions.length > 0) {
+		const actionsEl = document.createElement('div');
+		actionsEl.className = 'clip-feedback-actions';
+		actions.forEach(action => actionsEl.appendChild(action));
+		panel.appendChild(actionsEl);
+	}
+
+	panel.hidden = false;
+}
+
+function hideDuplicateFeedback(): void {
+	const banner = document.getElementById('duplicate-clip-banner') as HTMLElement | null;
+	if (banner) {
+		banner.hidden = true;
+		banner.textContent = '';
+	}
+}
+
+function hideSaveSuccess(): void {
+	const panel = document.getElementById('save-status-panel') as HTMLElement | null;
+	if (panel) {
+		panel.hidden = true;
+		panel.textContent = '';
+	}
+	if (successCloseTimer) {
+		window.clearTimeout(successCloseTimer);
+		successCloseTimer = undefined;
+	}
+}
+
+function getSavedClipNewHighlights(): AnyHighlightData[] {
+	if (!currentSavedClip) return [];
+	return getNewHighlights(currentHighlights, currentSavedClip.savedHighlightIds || []);
+}
+
+async function openCurrentSavedClip(): Promise<void> {
+	if (!currentSavedClip?.openUri) return;
+	await openSavedClip(currentSavedClip.openUri);
+}
+
+async function appendNewHighlightsToSavedClip(): Promise<void> {
+	if (!currentSavedClip || !currentTemplate) return;
+	const newHighlights = getSavedClipNewHighlights();
+	if (newHighlights.length === 0) {
+		await openCurrentSavedClip();
+		return;
+	}
+
+	const tabInfo = await getCurrentTabInfo();
+	const appendContent = buildHighlightAppendMarkdown(newHighlights, tabInfo.url);
+	const appendBehavior = currentSavedClip.behavior === 'append-daily' || currentSavedClip.behavior === 'prepend-daily'
+		? 'append-daily'
+		: 'append-specific';
+	const result = await saveToObsidian(
+		appendContent,
+		currentSavedClip.noteName,
+		currentSavedClip.path,
+		currentSavedClip.vault,
+		appendBehavior
+	);
+	const updatedRecord = await mergeSavedClipHighlightIds(tabInfo.url, getHighlightIds(newHighlights));
+	if (updatedRecord) currentSavedClip = updatedRecord;
+	const savedClip = currentSavedClip;
+	if (!savedClip) return;
+	await incrementStat('addToObsidian', savedClip.vault, savedClip.path, tabInfo.url, tabInfo.title);
+	hideDuplicateFeedback();
+	determineMainAction();
+	showSaveSuccess(result, savedClip);
+	await notifyPageClipStatus('saved', savedClip);
+}
+
+function applyDuplicateMainAction(): void {
+	const mainButton = document.getElementById('clip-btn') as HTMLButtonElement | null;
+	const moreDropdown = document.getElementById('more-dropdown');
+	const secondaryActions = moreDropdown?.querySelector('.secondary-actions');
+	if (!mainButton || !secondaryActions) return;
+
+	if (currentSavedClip) {
+		if (currentSavedClip.kind === 'download') {
+			secondaryActions.textContent = '';
+			mainButton.textContent = 'Already downloaded';
+			mainButton.disabled = true;
+			mainButton.onclick = null;
+			return;
+		}
+		const newHighlights = getSavedClipNewHighlights();
+		secondaryActions.textContent = '';
+		if (newHighlights.length > 0) {
+			mainButton.textContent = 'Append highlights';
+			mainButton.onclick = () => appendNewHighlightsToSavedClip();
+			addSecondaryAction(secondaryActions, 'openNote', () => openCurrentSavedClip());
+		} else {
+			mainButton.textContent = 'Open note';
+			mainButton.onclick = () => openCurrentSavedClip();
+		}
+		addSecondaryAction(secondaryActions, 'saveCopy', () => handleClipObsidian({ forceCopy: true }));
+		return;
+	}
+
+	if (currentLegacyDuplicate) {
+		secondaryActions.textContent = '';
+		mainButton.textContent = 'Save copy';
+		mainButton.onclick = () => handleClipObsidian({ forceCopy: true });
+	}
+}
+
+function renderDuplicateFeedback(): void {
+	const banner = document.getElementById('duplicate-clip-banner') as HTMLElement | null;
+	if (!banner) return;
+
+	if (currentSavedClip) {
+		if (currentSavedClip.kind === 'download') {
+			const filename = currentSavedClip.filename || currentSavedClip.noteFile || '';
+			const savedAt = currentSavedClip.lastSavedAt ? dayjs(currentSavedClip.lastSavedAt).format('YYYY-MM-DD HH:mm') : '';
+			setPanelContent(
+				banner,
+				'clip-feedback-banner is-warning',
+				'Already downloaded',
+				[filename, savedAt ? `Downloaded ${savedAt}` : ''].filter(Boolean).join(' - '),
+				[createFeedbackButton('Dismiss', hideDuplicateFeedback, true)]
+			);
+			applyDuplicateMainAction();
+			return;
+		}
+		const newHighlights = getSavedClipNewHighlights();
+		const target = formatSavedClipTarget(currentSavedClip) || 'Obsidian';
+		const savedAt = currentSavedClip.lastSavedAt ? dayjs(currentSavedClip.lastSavedAt).format('YYYY-MM-DD HH:mm') : '';
+		const actions = newHighlights.length > 0
+			? [
+				createFeedbackButton('Append highlights', appendNewHighlightsToSavedClip, true),
+				createFeedbackButton('Open note', openCurrentSavedClip),
+				createFeedbackButton('Save copy', () => handleClipObsidian({ forceCopy: true })),
+			]
+			: [
+				createFeedbackButton('Open note', openCurrentSavedClip, true),
+				createFeedbackButton('Save copy', () => handleClipObsidian({ forceCopy: true })),
+			];
+
+		setPanelContent(
+			banner,
+			'clip-feedback-banner is-warning',
+			`Already clipped to ${target}`,
+			savedAt ? `Saved ${savedAt}` : '',
+			actions
+		);
+		applyDuplicateMainAction();
+		return;
+	}
+
+	if (currentLegacyDuplicate) {
+		const savedAt = currentLegacyDuplicate.datetime ? dayjs(currentLegacyDuplicate.datetime).format('YYYY-MM-DD HH:mm') : '';
+		setPanelContent(
+			banner,
+			'clip-feedback-banner is-warning',
+			'Already clipped',
+			savedAt ? `Older history entry from ${savedAt}. Open note and append are unavailable for this record.` : 'Older history entry found. Open note and append are unavailable for this record.',
+			[createFeedbackButton('Save copy', () => handleClipObsidian({ forceCopy: true }), true)]
+		);
+		applyDuplicateMainAction();
+	}
+}
+
+async function refreshSavedClipFeedback(url?: string): Promise<void> {
+	if (!url) return;
+	currentSavedClip = await getSavedClip(url);
+	currentLegacyDuplicate = currentSavedClip ? null : await findLegacyDuplicateHistory(url);
+
+	hideSaveSuccess();
+	if (currentSavedClip || currentLegacyDuplicate) {
+		renderDuplicateFeedback();
+		const status = currentSavedClip && getSavedClipNewHighlights().length > 0 ? 'duplicate' : 'saved';
+		await notifyPageClipStatus(status, currentSavedClip || undefined, false);
+	} else {
+		hideDuplicateFeedback();
+		determineMainAction();
+		await notifyPageClipStatus('none', undefined, false);
+	}
+}
+
+function showSaveSuccess(result: SaveToObsidianResult, record?: SavedClipRecord): void {
+	const panel = document.getElementById('save-status-panel') as HTMLElement | null;
+	if (!panel) return;
+
+	const target = [result.vault, result.noteFile].filter(Boolean).join(' / ');
+	setPanelContent(
+		panel,
+		'clip-status-panel is-success',
+		result.vault ? `Saved to ${result.vault}` : 'Saved to Obsidian',
+		result.noteFile || target,
+		[
+			createFeedbackButton('Open note', async () => { await openSavedClip(record?.openUri || result.openUri); }, true),
+			createFeedbackButton('Dismiss', hideSaveSuccess),
+		]
+	);
+
+	if (!isSidePanel && !isIframe) {
+		const cancelClose = () => {
+			if (successCloseTimer) {
+				window.clearTimeout(successCloseTimer);
+				successCloseTimer = undefined;
+			}
+		};
+		panel.addEventListener('mouseenter', cancelClose, { once: true });
+		panel.addEventListener('focusin', cancelClose, { once: true });
+		successCloseTimer = window.setTimeout(() => window.close(), 4000);
+	}
+}
+
+async function notifyPageClipStatus(status: 'none' | 'saved' | 'duplicate' | 'failed', record?: SavedClipRecord, showToast = true): Promise<void> {
+	if (!currentTabId) return;
+
+	browser.runtime.sendMessage({
+		action: 'setClipBadgeStatus',
+		tabId: currentTabId,
+		status,
+	}).catch(() => undefined);
+
+	const message = {
+		action: 'setClipPageIndicator',
+		status,
+		showToast,
+		showSavedPageIndicator: loadedSettings?.showSavedPageIndicator ?? true,
+		changeSavedPageFavicon: loadedSettings?.changeSavedPageFavicon ?? true,
+		savedClip: record,
+	};
+
+	browser.runtime.sendMessage({
+		action: 'sendMessageToTab',
+		tabId: currentTabId,
+		message,
+	}).catch(() => undefined);
+}
+
 function logError(message: string, error?: any): void {
 	console.error(message, error);
 	showError(message);
@@ -701,6 +970,7 @@ async function refreshFields(tabId: number, { checkTemplateTriggers = true, rebu
 		const extractedData = await extractionPromise;
 		if (extractedData) {
 			const currentUrl = tab.url;
+			currentHighlights = extractedData.highlights || [];
 
 			const initializedContent = await initializePageContent(
 				extractedData.content,
@@ -733,6 +1003,7 @@ async function refreshFields(tabId: number, { checkTemplateTriggers = true, rebu
 
 				// Update variables panel if it's open
 				updateVariablesPanel(currentTemplate, currentVariables);
+				await refreshSavedClipFeedback(currentUrl);
 			} else {
 				throw new Error('Unable to initialize page content.');
 			}
@@ -1281,35 +1552,31 @@ function determineMainAction() {
 	const secondaryActions = moreDropdown?.querySelector('.secondary-actions');
 	if (!mainButton || !secondaryActions) return;
 
-	// Clear existing secondary actions
+	(mainButton as HTMLButtonElement).disabled = false;
 	secondaryActions.textContent = '';
 
-	// Set up actions based on saved behavior
 	switch (loadedSettings.saveBehavior) {
 		case 'copyToClipboard':
 			mainButton.textContent = getMessage('copyToClipboard');
 			mainButton.onclick = () => copyContent();
-			// Add direct actions to secondary
 			addSecondaryAction(secondaryActions, 'addToObsidian', () => handleClipObsidian());
 			addSecondaryAction(secondaryActions, 'saveFile', handleSaveToDownloads);
 			break;
 		case 'saveFile':
 			mainButton.textContent = getMessage('saveFile');
 			mainButton.onclick = () => handleSaveToDownloads();
-			// Add direct actions to secondary
 			addSecondaryAction(secondaryActions, 'addToObsidian', () => handleClipObsidian());
 			addSecondaryAction(secondaryActions, 'copyToClipboard', copyContent);
 			break;
-		default: // 'addToObsidian'
+		default:
 			mainButton.textContent = getMessage('addToObsidian');
 			mainButton.onclick = () => handleClipObsidian();
-			// Add direct actions to secondary
 			addSecondaryAction(secondaryActions, 'copyToClipboard', copyContent);
 			addSecondaryAction(secondaryActions, 'saveFile', handleSaveToDownloads);
 	}
 }
 
-async function handleClipObsidian(): Promise<void> {
+async function handleClipObsidian(options: { forceCopy?: boolean } = {}): Promise<void> {
 	if (!currentTemplate) return;
 
 	const vaultDropdown = document.getElementById('vault-select') as HTMLSelectElement;
@@ -1346,18 +1613,48 @@ async function handleClipObsidian(): Promise<void> {
 		const noteName = isDailyNote ? '' : noteNameField?.value || '';
 		const path = isDailyNote ? '' : pathField?.value || '';
 
-		await saveToObsidian(fileContent, noteName, path, selectedVault, currentTemplate.behavior);
+		if (!options.forceCopy && currentSavedClip) {
+			const newHighlights = getSavedClipNewHighlights();
+			if (newHighlights.length > 0) {
+				await appendNewHighlightsToSavedClip();
+			} else {
+				await openCurrentSavedClip();
+			}
+			return;
+		}
+
+		const saveResult = await saveToObsidian(fileContent, noteName, path, selectedVault, currentTemplate.behavior);
 		const tabInfo = await getCurrentTabInfo();
 		await incrementStat('addToObsidian', selectedVault, path, tabInfo.url, tabInfo.title);
+		const savedRecord = await saveSavedClip({
+			url: tabInfo.url,
+			title: tabInfo.title,
+			vault: saveResult.vault,
+			path: saveResult.path,
+			noteName: saveResult.noteName,
+			noteFile: saveResult.noteFile,
+			templateId: currentTemplate.id,
+			templateName: currentTemplate.name,
+			behavior: currentTemplate.behavior,
+			savedHighlightIds: getHighlightIds(currentHighlights),
+			openUri: saveResult.openUri,
+		});
+		currentSavedClip = savedRecord;
+		currentLegacyDuplicate = null;
 
 		lastSelectedVault = selectedVault;
 		await setLocalStorage('lastSelectedVault', lastSelectedVault);
 
-		if (!isSidePanel) {
-			setTimeout(() => window.close(), 500);
-		}
+		hideDuplicateFeedback();
+		determineMainAction();
+		showSaveSuccess(saveResult, savedRecord);
+		await notifyPageClipStatus('saved', savedRecord);
 	} catch (error) {
 		console.error('Error in handleClipObsidian:', error);
+		const tabInfo = await getCurrentTabInfo().catch(() => null);
+		if (tabInfo?.url) {
+			await notifyPageClipStatus('failed', currentSavedClip || undefined);
+		}
 		showError('failedToSaveFile');
 		throw error;
 	}
@@ -1395,6 +1692,8 @@ function getActionIcon(actionType: string): string {
 		case 'copyToClipboard': return 'copy';
 		case 'saveFile': return 'file-down';
 		case 'addToObsidian': return 'pen-line';
+		case 'openNote': return 'external-link';
+		case 'saveCopy': return 'copy';
 		default: return 'plus';
 	}
 }

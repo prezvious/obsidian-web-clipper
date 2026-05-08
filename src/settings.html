@@ -21,7 +21,6 @@
 						<li data-section="reader"><div class="nav-item-icon"><i data-lucide="book-open"></i></div><span data-i18n="reader">Reader</span></li>
 						<li data-section="highlighter"><div class="nav-item-icon"><i data-lucide="highlighter"></i></div><span data-i18n="highlighter">Highlighter</span></li>
 						<li data-section="interpreter"><div class="nav-item-icon"><i data-lucide="quote"></i></div><span data-i18n="interpreter">Interpreter</span></li>
-						<li data-section="properties"><div class="nav-item-icon"><i data-lucide="archive"></i></div><span data-i18n="properties">Properties</span></li>
 						<li class="sidebar-heading" data-i18n="templatesHeading">Templates</li>
 					</ul>
 					<button type="button" id="new-template-btn" class="mod-cta" data-i18n="newTemplate">New&nbsp;template</button>
@@ -148,44 +147,35 @@
 								<div class="setting-items">
 									<div class="setting-item mod-horizontal">
 										<div class="setting-item-info">
-											<label for="save-behavior-dropdown" data-i18n="saveBehaviorLabel">Save behavior</label>
-											<div class="setting-item-description" data-i18n="saveBehaviorDescription">
-												Choose the default option for saving pages. Alternate options appear in the dropdown menu next to the main button.
+											<label>Fast capture</label>
+											<div class="setting-item-description">
+												Toolbar, context menu, and quick clip actions convert the page to Markdown and download it immediately.
 											</div>
-										</div>
-										<div class="setting-item-control">
-											<select id="save-behavior-dropdown">
-												<option value="addToObsidian" selected data-i18n="addToObsidian">Add to Obsidian</option>
-												<option value="copyToClipboard" data-i18n="copyToClipboard">Copy to clipboard</option>
-												<option value="saveFile" data-i18n="saveFile">Save file</option>
-											</select>
-										</div>
-									</div>
-									<div class="setting-item mod-horizontal">
-										<div class="setting-item-info">
-											<label for="open-behavior-dropdown" data-i18n="openBehaviorTitle">Default open behavior</label>
-											<div class="setting-item-description" data-i18n="openBehaviorDescription">
-												Choose how Web Clipper opens by default.
-											</div>
-										</div>
-										<div class="setting-item-control">
-											<select id="open-behavior-dropdown">
-												<option value="popup" selected data-i18n="popup">Popup</option>
-												<option value="embedded" data-i18n="embedded">Embedded</option>
-												<option value="reader" data-i18n="reader">Reader</option>
-											</select>
 										</div>
 									</div>
 									<div class="setting-item mod-horizontal mod-toggle">
 										<div class="setting-item-info">
-											<label for="silent-open-toggle" data-i18n="silentOpen">Save clipped note without opening&nbsp;it</label>
-											<div class="setting-item-description" data-i18n="silentOpenDescription">
-												Clipped notes will be saved but will not open as a new tab. Obsidian will still be brought to the foreground.
+											<label for="saved-page-indicator-toggle">Show saved page indicator</label>
+											<div class="setting-item-description">
+												Show a small clipped badge on pages that have already been saved from this browser profile.
 											</div>
 										</div>
 										<div class="setting-item-control">
 											<div class="checkbox-container">
-												<input type="checkbox" id="silent-open-toggle" />
+												<input type="checkbox" id="saved-page-indicator-toggle" />
+											</div>
+										</div>
+									</div>
+									<div class="setting-item mod-horizontal mod-toggle">
+										<div class="setting-item-info">
+											<label for="saved-page-favicon-toggle">Change page favicon for clipped pages</label>
+											<div class="setting-item-description">
+												Replace the tab icon with a saved, warning, or error marker while Web Clipper status is active.
+											</div>
+										</div>
+										<div class="setting-item-control">
+											<div class="checkbox-container">
+												<input type="checkbox" id="saved-page-favicon-toggle" />
 											</div>
 										</div>
 									</div>
@@ -230,7 +220,7 @@
 									<div class="setting-item mod-horizontal">
 										<div class="setting-item-info">
 											<label for="export-all-settings-btn" data-i18n="exportAllSettings">Export all settings</label>
-											<div class="setting-item-description" data-i18n="exportAllSettingsDescription">Export all settings including templates and properties.</div>
+											<div class="setting-item-description">Export all settings and templates.</div>
 										</div>
 										<div class="setting-item-control">
 											<button type="button" id="export-all-settings-btn" data-i18n="export">Export</button>
@@ -239,7 +229,7 @@
 									<div class="setting-item mod-horizontal">
 										<div class="setting-item-info">
 											<label for="import-all-settings-btn" data-i18n="importAllSettings">Import all settings</label>
-											<div class="setting-item-description" data-i18n="importAllSettingsDescription">Import all settings including templates and properties. This will replace your current configuration.</div>
+											<div class="setting-item-description">Import all settings and templates. This will replace your current configuration.</div>
 										</div>
 										<div class="setting-item-control">
 											<button type="button" id="import-all-settings-btn" data-i18n="import">Import</button>
@@ -561,61 +551,6 @@
 						</form>
 					</div>
 
-					<div id="properties-section" class="settings-section">
-						<div class="settings-section-header">
-							<h2 data-i18n="propertiesSettings">Properties</h2>
-						</div>
-						<form id="property-types-form">
-							<div class="setting-group">
-								<div class="setting-items">
-								<div class="setting-item mod-horizontal">
-									<div class="setting-item-info">
-										<label for="import-types-btn" data-i18n="importProperties">Import properties</label>
-										<div class="setting-item-description" data-i18n="importPropertiesDescription">
-											To import your properties from Obsidian, locate the <strong>types.json</strong> file in the <strong>.obsidian</strong> folder within your vault. Note this folder is hidden by default on most operating systems.
-										</div>
-									</div>
-									<div class="setting-item-control">
-										<button type="button" id="import-types-btn" data-i18n="import">Import</button>
-									</div>
-								</div>
-								<div class="setting-item mod-horizontal">
-									<div class="setting-item-info">
-										<label for="export-types-btn" data-i18n="exportProperties">Export properties</label>
-										<div class="setting-item-description" data-i18n="exportPropertiesDescription">
-											Save Web Clipper properties to a <strong>types.json</strong> file that can be imported into your Obsidian vault, or into Web Clipper on other devices.
-										</div>
-									</div>
-									<div class="setting-item-control">
-										<button type="button" id="export-types-btn" data-i18n="export">Export</button>
-									</div>
-								</div>
-								<div class="setting-item mod-horizontal">
-									<div class="setting-item-info">
-										<label for="delete-unused-properties-btn" data-i18n="removeUnusedProperties">Remove unused properties</label>
-										<div class="setting-item-description" data-i18n="removeUnusedPropertiesDescription">
-											Remove all properties that are not used in any template.
-										</div>
-									</div>
-									<div class="setting-item-control">
-										<button type="button" id="delete-unused-properties-btn" data-i18n="remove">Remove</button>
-									</div>
-								</div>
-								</div>
-							</div>
-							<div class="setting-group">
-								<div class="setting-item setting-item-heading"><h3 data-i18n="allProperties">All properties</h3></div>
-								<div class="setting-items">
-								<div class="add-btn" style="display: none;">
-									<a id="add-property-type-btn">+ Add property</a>
-								</div>
-								<div id="property-types-list" class="properties-list"></div>
-								</div>
-							</div>
-							
-						</form>
-					</div>
-
 					<div id="templates-section" class="settings-section">
 						<div class="settings-section-header">
 							<h2 id="template-editor-title" data-i18n="editTemplate">Edit template</h2>
@@ -721,14 +656,6 @@
 								<div class="setting-group">
 									<div class="setting-item setting-item-heading"><h3 data-i18n="templateGroupContent">Content</h3></div>
 									<div class="setting-items">
-										<div id="properties-container">
-											<label data-i18n="templateProperties">Properties</label>
-											<div class="setting-item-description" data-i18n="templatePropertiesDescription">Properties to add to the top of the clipped note. Use variables to pre-populate data from the page.</div>
-											<div id="template-properties" class="properties-list"></div>
-											<div class="add-btn metadata-add-btn">
-												<a id="add-property-btn" data-i18n="addProperty">+ Add property</a>
-											</div>
-										</div>
 										<div class="setting-item">
 											<label for="note-content-format" data-i18n="noteContent">Note content</label>
 											<div class="setting-item-description" data-i18n="noteContentDescription">Customize the content of the note. Use variables to pre-populate data from the page.</div>

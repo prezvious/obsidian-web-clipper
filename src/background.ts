@@ -3,11 +3,46 @@ import { detectBrowser } from './utils/browser-detection';
 import { updateCurrentActiveTab, isValidUrl, isBlankPage, isNormalPageUrl } from './utils/active-tab-manager';
 import { TextHighlightData } from './utils/highlighter';
 import { debounce } from './utils/debounce';
-import { Settings } from './types/types';
+import { HistoryEntry, Settings, SavedClipRecord, SavedClipsMap } from './types/types';
 import { debugLog } from './utils/debug';
+import { buildSavedClipRecord, normalizeClipUrl } from './utils/saved-clips';
 
 const YOUTUBE_EMBED_RULE_ID = 9001;
 const YOUTUBE_INNERTUBE_RULE_ID = 9002;
+const FORBIDDEN_REQUEST_HEADERS = new Set([
+	'accept-encoding',
+	'connection',
+	'content-length',
+	'cookie',
+	'host',
+	'origin',
+	'referer',
+	'user-agent',
+]);
+
+interface DownloadMarkdownRequest {
+	action: 'downloadMarkdown';
+	markdown?: string;
+	filename?: string;
+}
+
+interface ExtractMarkdownForDownloadResponse {
+	success?: boolean;
+	markdown?: string;
+	filename?: string;
+	title?: string;
+	error?: string;
+}
+
+interface DefuddleProxyFetchRequest {
+	action: 'defuddleProxyFetch';
+	url?: string;
+	init?: {
+		method?: string;
+		headers?: Record<string, unknown>;
+		body?: string;
+	};
+}
 
 // Chrome: declarativeNetRequest to rewrite Referer on YouTube embeds.
 // Safari/Firefox use the native video element instead (see reader.ts).
@@ -172,6 +207,208 @@ async function ensureContentScriptLoadedInBackground(tabId: number): Promise<voi
 	}
 }
 
+function sanitizeDownloadFilename(filename: string): string {
+	const cleaned = filename
+		.replace(/[<>:"/\\|?*\x00-\x1F]/g, '-')
+		.replace(/\s+/g, ' ')
+		.trim()
+		.slice(0, 180);
+
+	return cleaned.toLowerCase().endsWith('.md') ? cleaned : `${cleaned || 'clipping'}.md`;
+}
+
+async function downloadMarkdown(message: DownloadMarkdownRequest): Promise<{ success: true; downloadId?: number; filename: string }> {
+	const markdown = typeof message.markdown === 'string' ? message.markdown : '';
+	if (!markdown) {
+		throw new Error('Nothing to download.');
+	}
+
+	const filename = sanitizeDownloadFilename(message.filename || 'clipping.md');
+	const url = `data:text/markdown;charset=utf-8,${encodeURIComponent(markdown)}`;
+	const downloadId = await browser.downloads.download({
+		url,
+		filename,
+		conflictAction: 'uniquify',
+		saveAs: false,
+	});
+
+	return { success: true, downloadId, filename };
+}
+
+function sanitizeProxyHeaders(rawHeaders: Record<string, unknown> = {}): Record<string, string> {
+	const headers: Record<string, string> = {};
+	for (const [name, value] of Object.entries(rawHeaders)) {
+		const normalizedName = name.toLowerCase();
+		if (FORBIDDEN_REQUEST_HEADERS.has(normalizedName)) continue;
+		if (value === undefined || value === null) continue;
+		headers[name] = String(value);
+	}
+	return headers;
+}
+
+async function proxyFetchForDefuddle(message: DefuddleProxyFetchRequest): Promise<{
+	success: true;
+	status: number;
+	statusText: string;
+	headers: Record<string, string>;
+	body: string;
+}> {
+	const targetUrl = message.url;
+	if (typeof targetUrl !== 'string' || !/^https?:\/\//i.test(targetUrl)) {
+		throw new Error('Only HTTP and HTTPS URLs can be fetched by the extension.');
+	}
+
+	const init = message.init || {};
+	const method = (init.method || 'GET').toUpperCase();
+	const fetchInit: RequestInit = {
+		method,
+		headers: sanitizeProxyHeaders(init.headers),
+		redirect: 'follow',
+		credentials: 'omit',
+		cache: 'no-store',
+	};
+
+	if (init.body !== undefined && method !== 'GET' && method !== 'HEAD') {
+		fetchInit.body = init.body;
+	}
+
+	const controller = new AbortController();
+	const timeout = setTimeout(() => controller.abort(), 15000);
+	fetchInit.signal = controller.signal;
+
+	try {
+		const response = await fetch(targetUrl, fetchInit);
+		const body = await response.text();
+		const responseHeaders: Record<string, string> = {};
+		response.headers.forEach((value, key) => {
+			responseHeaders[key] = value;
+		});
+
+		return {
+			success: true,
+			status: response.status,
+			statusText: response.statusText,
+			headers: responseHeaders,
+			body,
+		};
+	} catch (error) {
+		if (error instanceof Error && error.name === 'AbortError') {
+			throw new Error('Timed out fetching URL.');
+		}
+		throw error;
+	} finally {
+		clearTimeout(timeout);
+	}
+}
+
+async function findLegacyDuplicateClip(url: string): Promise<SavedClipRecord | null> {
+	const result = await browser.storage.local.get('history');
+	const history = (result.history || []) as HistoryEntry[];
+	const normalizedUrl = normalizeClipUrl(url);
+	const entry = history.find(item => (item.action === 'addToObsidian' || item.action === 'saveFile') && normalizeClipUrl(item.url) === normalizedUrl);
+	if (!entry) return null;
+
+	return buildSavedClipRecord({
+		kind: 'download',
+		url,
+		title: entry.title,
+		filename: entry.title ? sanitizeDownloadFilename(entry.title) : undefined,
+		timestamp: entry.datetime,
+	});
+}
+
+async function getDuplicateClipForUrl(url: string): Promise<SavedClipRecord | null> {
+	return await getSavedClipForUrl(url) || await findLegacyDuplicateClip(url);
+}
+
+async function saveDownloadedClipRecord(input: {
+	url: string;
+	title?: string;
+	filename: string;
+	downloadId?: number;
+}): Promise<SavedClipRecord> {
+	const result = await browser.storage.local.get('savedClips');
+	const savedClips = (result.savedClips || {}) as SavedClipsMap;
+	const normalizedUrl = normalizeClipUrl(input.url);
+	const record = buildSavedClipRecord({
+		kind: 'download',
+		url: input.url,
+		title: input.title,
+		filename: input.filename,
+		noteFile: input.filename,
+		downloadId: input.downloadId,
+	}, savedClips[normalizedUrl]);
+	savedClips[normalizedUrl] = record;
+	await browser.storage.local.set({ savedClips });
+	return record;
+}
+
+async function notifyTabClipStatus(tabId: number, status: ClipBadgeStatus, savedClip?: SavedClipRecord | null, showToast = false): Promise<void> {
+	await setClipBadgeStatus(tabId, status);
+	if (status === 'failed') {
+		globalThis.setTimeout(async () => {
+			const tab = await browser.tabs.get(tabId).catch(() => null);
+			await updateSavedClipIndicators(tabId, tab?.url);
+		}, 8000);
+	}
+
+	try {
+		await ensureContentScriptLoadedInBackground(tabId);
+		const settings = await getClipIndicatorSettings();
+		await browser.tabs.sendMessage(tabId, {
+			action: 'setClipPageIndicator',
+			status,
+			showToast,
+			showSavedPageIndicator: settings.showSavedPageIndicator,
+			changeSavedPageFavicon: settings.changeSavedPageFavicon,
+			savedClip,
+		});
+	} catch (error) {
+		debugLog('Clipper', 'Unable to update clip page indicator', error);
+	}
+}
+
+async function captureCurrentTabMarkdown(tab?: browser.Tabs.Tab): Promise<void> {
+	let currentTab = tab;
+	if (!currentTab?.id) {
+		const tabs = await browser.tabs.query({ active: true, currentWindow: true });
+		currentTab = tabs[0];
+	}
+
+	if (!currentTab?.id || !currentTab.url || !isValidUrl(currentTab.url) || isBlankPage(currentTab.url)) {
+		return;
+	}
+
+	try {
+		const duplicate = await getDuplicateClipForUrl(currentTab.url);
+		if (duplicate) {
+			await notifyTabClipStatus(currentTab.id, 'duplicate', duplicate, true);
+			return;
+		}
+
+		await ensureContentScriptLoadedInBackground(currentTab.id);
+		const response = await browser.tabs.sendMessage(currentTab.id, { action: "extractMarkdownForDownload" }) as ExtractMarkdownForDownloadResponse;
+		if (!response?.success) {
+			throw new Error(response?.error || 'Failed to extract page.');
+		}
+		const downloadResponse = await downloadMarkdown({
+			action: 'downloadMarkdown',
+			markdown: response.markdown,
+			filename: response.filename,
+		});
+		const savedRecord = await saveDownloadedClipRecord({
+			url: currentTab.url,
+			title: response.title || currentTab.title,
+			filename: downloadResponse.filename,
+			downloadId: downloadResponse.downloadId,
+		});
+		await notifyTabClipStatus(currentTab.id, 'saved', savedRecord, false);
+	} catch (error) {
+		console.error('Failed to automatically download page:', error);
+		await notifyTabClipStatus(currentTab.id, 'failed', await getSavedClipForUrl(currentTab.url), true).catch(() => undefined);
+	}
+}
+
 // Route a message to a tab, handling both normal pages (via content script)
 // and extension pages like the reader page (via runtime.sendMessage forwarding).
 async function routeMessageToTab(tabId: number, message: any): Promise<any> {
@@ -333,7 +570,50 @@ browser.runtime.onMessage.addListener((request: unknown) => {
 
 browser.runtime.onMessage.addListener((request: unknown, sender: browser.Runtime.MessageSender, sendResponse: (response?: any) => void): true | undefined => {
 	if (typeof request === 'object' && request !== null) {
-		const typedRequest = request as { action: string; isActive?: boolean; hasHighlights?: boolean; tabId?: number; text?: string; section?: string; readerUrl?: string };
+		const typedRequest = request as { action: string; isActive?: boolean; hasHighlights?: boolean; tabId?: number; text?: string; section?: string; readerUrl?: string; markdown?: string; filename?: string; url?: string; status?: ClipBadgeStatus; init?: { method?: string; headers?: Record<string, unknown>; body?: string } };
+
+		if (typedRequest.action === 'downloadMarkdown') {
+			downloadMarkdown(typedRequest as DownloadMarkdownRequest)
+				.then(sendResponse)
+				.catch((error) => sendResponse({ success: false, error: error instanceof Error ? error.message : String(error) }));
+			return true;
+		}
+
+		if (typedRequest.action === 'defuddleProxyFetch') {
+			proxyFetchForDefuddle(typedRequest as DefuddleProxyFetchRequest)
+				.then(sendResponse)
+				.catch((error) => sendResponse({ success: false, error: error instanceof Error ? error.message : String(error) }));
+			return true;
+		}
+
+		if (typedRequest.action === 'setClipBadgeStatus' && typedRequest.tabId && typedRequest.status) {
+			setClipBadgeStatus(typedRequest.tabId, typedRequest.status)
+				.then(() => {
+					if (typedRequest.status === 'failed' && typedRequest.tabId) {
+						globalThis.setTimeout(async () => {
+							const tab = await browser.tabs.get(typedRequest.tabId!).catch(() => null);
+							await updateSavedClipIndicators(typedRequest.tabId!, tab?.url);
+						}, 8000);
+					}
+					sendResponse({ success: true });
+				})
+				.catch((error) => sendResponse({ success: false, error: error instanceof Error ? error.message : String(error) }));
+			return true;
+		}
+
+		if (typedRequest.action === 'setSenderClipBadgeStatus' && sender.tab?.id && typedRequest.status) {
+			setClipBadgeStatus(sender.tab.id, typedRequest.status)
+				.then(() => sendResponse({ success: true }))
+				.catch((error) => sendResponse({ success: false, error: error instanceof Error ? error.message : String(error) }));
+			return true;
+		}
+
+		if (typedRequest.action === 'clipperUrlChanged' && sender.tab?.id) {
+			updateSavedClipIndicators(sender.tab.id, typedRequest.url || sender.tab.url)
+				.then(() => sendResponse({ success: true }))
+				.catch((error) => sendResponse({ success: false, error: error instanceof Error ? error.message : String(error) }));
+			return true;
+		}
 		
 		if (typedRequest.action === 'copy-to-clipboard' && typedRequest.text) {
 			// Use content script to copy to clipboard
@@ -474,12 +754,12 @@ browser.runtime.onMessage.addListener((request: unknown, sender: browser.Runtime
 		}
 
 		if (typedRequest.action === "openPopup") {
-			openPopup()
+			captureCurrentTabMarkdown(sender.tab)
 				.then(() => {
 					sendResponse({ success: true });
 				})
 				.catch((error: unknown) => {
-					console.error('Error opening popup in background script:', error);
+					console.error('Error running fast capture in background script:', error);
 					sendResponse({ success: false, error: error instanceof Error ? error.message : String(error) });
 				});
 			return true;
@@ -746,11 +1026,7 @@ browser.commands.onCommand.addListener(async (command, tab) => {
 
 	if (command === 'quick_clip') {
 		if (tab?.id) {
-			openPopup();
-			setTimeout(() => {
-				browser.runtime.sendMessage({action: "triggerQuickClip"})
-					.catch(error => console.error("Failed to send quick clip message:", error));
-			}, 500);
+			await captureCurrentTabMarkdown(tab);
 		}
 	}
 	if (command === "toggle_highlighter" && tab?.id) {
@@ -794,13 +1070,8 @@ const debouncedUpdateContextMenu = debounce(async (tabId: number) => {
 		}[] = [
 				{
 					id: "open-obsidian-clipper",
-					title: "Save this page",
+					title: "Download page as Markdown",
 					contexts: ["page", "selection", "image", "video", "audio"]
-				},
-				{
-					id: 'copy-markdown-to-clipboard',
-					title: browser.i18n.getMessage('copyToClipboard'),
-					contexts: ["page", "selection"]
 				},
 				{
 					id: isReaderMode ? "exit-reader" : "enter-reader",
@@ -822,21 +1093,7 @@ const debouncedUpdateContextMenu = debounce(async (tabId: number) => {
 					title: "Add to highlights",
 					contexts: ["image", "video", "audio"]
 				},
-				{
-					id: 'open-embedded',
-					title: browser.i18n.getMessage('openEmbedded'),
-					contexts: ["page", "selection"]
-				}
 			];
-
-		const browserType = await detectBrowser();
-		if (browserType === 'chrome') {
-			menuItems.push({
-				id: 'open-side-panel',
-				title: browser.i18n.getMessage('openSidePanel'),
-				contexts: ["page", "selection"]
-			});
-		}
 
 		for (const item of menuItems) {
 			await browser.contextMenus.create(item);
@@ -850,7 +1107,7 @@ const debouncedUpdateContextMenu = debounce(async (tabId: number) => {
 
 browser.contextMenus.onClicked.addListener(async (info, tab) => {
 	if (info.menuItemId === "open-obsidian-clipper") {
-		openPopup();
+		await captureCurrentTabMarkdown(tab);
 	} else if (info.menuItemId === "enter-highlighter" && tab && tab.id) {
 		await setHighlighterMode(tab.id, true);
 	} else if (info.menuItemId === "exit-highlighter" && tab && tab.id) {
@@ -867,16 +1124,6 @@ browser.contextMenus.onClicked.addListener(async (info, tab) => {
 			readerModeState[tab.id] = response.isActive ?? false;
 			debouncedUpdateContextMenu(tab.id);
 		}
-	} else if (info.menuItemId === 'open-embedded' && tab && tab.id) {
-		await ensureContentScriptLoadedInBackground(tab.id);
-		await browser.tabs.sendMessage(tab.id, { action: "toggle-iframe" });
-	} else if (info.menuItemId === 'open-side-panel' && tab && tab.id && tab.windowId) {
-		chrome.sidePanel.open({ tabId: tab.id });
-		sidePanelOpenWindows.add(tab.windowId);
-		await ensureContentScriptLoadedInBackground(tab.id);
-	} else if (info.menuItemId === 'copy-markdown-to-clipboard' && tab && tab.id) {
-		await ensureContentScriptLoadedInBackground(tab.id);
-		await browser.tabs.sendMessage(tab.id, { action: "copyMarkdownToClipboard" });
 	}
 });
 
@@ -886,6 +1133,59 @@ browser.runtime.onInstalled.addListener(() => {
 
 async function isSidePanelOpen(windowId: number): Promise<boolean> {
 	return sidePanelOpenWindows.has(windowId);
+}
+
+type ClipBadgeStatus = 'none' | 'saved' | 'duplicate' | 'failed';
+
+async function getSavedClipForUrl(url?: string): Promise<SavedClipRecord | null> {
+	if (!url) return null;
+	const result = await browser.storage.local.get('savedClips');
+	const savedClips = (result.savedClips || {}) as SavedClipsMap;
+	return savedClips[normalizeClipUrl(url)] || null;
+}
+
+async function getClipIndicatorSettings(): Promise<{ showSavedPageIndicator: boolean; changeSavedPageFavicon: boolean }> {
+	const data = await browser.storage.sync.get('general_settings');
+	const general = (data.general_settings || {}) as Record<string, unknown>;
+	return {
+		showSavedPageIndicator: general.showSavedPageIndicator !== false,
+		changeSavedPageFavicon: general.changeSavedPageFavicon !== false,
+	};
+}
+
+async function setClipBadgeStatus(tabId: number, status: ClipBadgeStatus): Promise<void> {
+	const text = status === 'saved' ? '\u2713' : status === 'duplicate' || status === 'failed' ? '!' : '';
+	const color = status === 'failed' ? '#e03131' : status === 'duplicate' ? '#f59f00' : '#2f9e44';
+	await browser.action.setBadgeText({ tabId, text });
+	if (text) {
+		await browser.action.setBadgeBackgroundColor({ tabId, color });
+	}
+}
+
+async function updateSavedClipIndicators(tabId: number, url?: string): Promise<void> {
+	if (!url || !isValidUrl(url) || isBlankPage(url)) {
+		await setClipBadgeStatus(tabId, 'none');
+		return;
+	}
+
+	const savedClip = await getSavedClipForUrl(url);
+	const status: ClipBadgeStatus = savedClip ? 'saved' : 'none';
+	await setClipBadgeStatus(tabId, status);
+
+	try {
+		await ensureContentScriptLoadedInBackground(tabId);
+		const settings = await getClipIndicatorSettings();
+		await browser.tabs.sendMessage(tabId, {
+			action: 'setClipPageIndicator',
+			status,
+			showToast: false,
+			showSavedPageIndicator: settings.showSavedPageIndicator,
+			changeSavedPageFavicon: settings.changeSavedPageFavicon,
+			savedClip,
+		});
+	} catch (error) {
+		debugLog('Clipper', 'Unable to update saved clip page indicator', error);
+	}
 }
 
 async function setupTabListeners() {
@@ -908,6 +1208,9 @@ const debouncedPaintHighlights = debounce(async (tabId: number) => {
 }, 250);
 
 async function handleTabChange(activeInfo: { tabId: number; windowId?: number }) {
+	const tab = await browser.tabs.get(activeInfo.tabId).catch(() => null);
+	await updateSavedClipIndicators(activeInfo.tabId, tab?.url);
+
 	if (activeInfo.windowId && await isSidePanelOpen(activeInfo.windowId)) {
 		updateCurrentActiveTab(activeInfo.windowId);
 		await debouncedPaintHighlights(activeInfo.tabId);
@@ -1037,8 +1340,7 @@ async function injectReaderScript(tabId: number) {
 	}
 }
 
-// When set to 'reader' or 'embedded', clear the popup so action.onClicked fires
-// instead, handling the action directly without briefly opening the popup.
+// Capture runs directly from the toolbar; settings stay available through the options page.
 const validOpenBehaviors: Settings['openBehavior'][] = ['popup', 'embedded', 'reader'];
 
 function parseOpenBehavior(raw: string | undefined): Settings['openBehavior'] {
@@ -1051,50 +1353,25 @@ async function updateActionPopup(openBehavior?: Settings['openBehavior']): Promi
 		openBehavior = parseOpenBehavior((data.general_settings as Record<string, string>)?.openBehavior);
 	}
 	currentOpenBehavior = openBehavior;
-	if (openBehavior === 'reader' || openBehavior === 'embedded') {
-		await browser.action.setPopup({ popup: '' });
-	} else {
-		await browser.action.setPopup({ popup: 'popup.html' });
-	}
+	await browser.action.setPopup({ popup: '' });
 }
 
 let currentOpenBehavior: Settings['openBehavior'] = 'popup';
 
-// In reader/embedded mode, opens embedded iframe instead of popup.
-async function openPopup(): Promise<void> {
-	if (currentOpenBehavior === 'reader' || currentOpenBehavior === 'embedded') {
-		const tabs = await browser.tabs.query({ active: true, currentWindow: true });
-		const tab = tabs[0];
-		if (tab?.id && tab.url && isValidUrl(tab.url) && !isBlankPage(tab.url)) {
-			await ensureContentScriptLoadedInBackground(tab.id);
-			await browser.tabs.sendMessage(tab.id, { action: "toggle-iframe" });
-			return;
-		}
-		// Fall through to popup if tab is invalid
-	}
-	await browser.action.openPopup();
-}
-
 browser.action.onClicked.addListener(async (tab) => {
 	if (!tab?.id || !tab.url || !isValidUrl(tab.url) || isBlankPage(tab.url)) return;
-
-	if (currentOpenBehavior === 'reader') {
-		await ensureContentScriptLoadedInBackground(tab.id);
-		await injectReaderScript(tab.id);
-		const response = await browser.tabs.sendMessage(tab.id, { action: "toggleReaderMode" }) as { success?: boolean; isActive?: boolean };
-		if (response?.success) {
-			readerModeState[tab.id] = response.isActive ?? false;
-			debouncedUpdateContextMenu(tab.id);
-		}
-	} else if (currentOpenBehavior === 'embedded') {
-		await ensureContentScriptLoadedInBackground(tab.id);
-		await browser.tabs.sendMessage(tab.id, { action: "toggle-iframe" });
-	}
+	await captureCurrentTabMarkdown(tab);
 });
 
 browser.storage.onChanged.addListener((changes, area) => {
 	if (area === 'sync' && changes.general_settings) {
 		updateActionPopup(parseOpenBehavior((changes.general_settings.newValue as Record<string, string>)?.openBehavior));
+	}
+	if ((area === 'local' && changes.savedClips) || (area === 'sync' && changes.general_settings)) {
+		browser.tabs.query({ active: true, currentWindow: true }).then((tabs) => {
+			const tab = tabs[0];
+			if (tab?.id) updateSavedClipIndicators(tab.id, tab.url);
+		}).catch(() => undefined);
 	}
 });
 

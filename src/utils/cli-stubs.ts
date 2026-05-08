@@ -11,6 +11,8 @@ export const generalSettings: Settings = {
 	betaFeatures: false,
 	legacyMode: false,
 	silentOpen: false,
+	showSavedPageIndicator: true,
+	changeSavedPageFavicon: true,
 	openBehavior: 'popup',
 	highlighterEnabled: false,
 	alwaysShowHighlights: false,

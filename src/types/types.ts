@@ -73,6 +73,8 @@ export interface ReaderSettings {
 export interface Settings {
 	vaults: string[];
 	showMoreActionsButton: boolean;
+	showSavedPageIndicator: boolean;
+	changeSavedPageFavicon: boolean;
 	betaFeatures: boolean;
 	legacyMode: boolean;
 	silentOpen: boolean;
@@ -115,6 +117,29 @@ export interface HistoryEntry {
 	vault?: string;
 	path?: string;
 }
+
+export interface SavedClipRecord {
+	kind?: 'obsidian' | 'download';
+	normalizedUrl: string;
+	url: string;
+	title?: string;
+	vault: string;
+	path: string;
+	noteName: string;
+	noteFile: string;
+	filename?: string;
+	downloadId?: number;
+	downloadedAt?: string;
+	templateId?: string;
+	templateName?: string;
+	behavior?: Template['behavior'];
+	firstSavedAt: string;
+	lastSavedAt: string;
+	savedHighlightIds: string[];
+	openUri?: string;
+}
+
+export type SavedClipsMap = Record<string, SavedClipRecord>;
 
 export interface ConversationMessage {
 	author: string;

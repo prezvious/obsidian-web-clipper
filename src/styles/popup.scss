@@ -97,6 +97,55 @@
 
 }
 
+.clip-status-panel,
+.clip-feedback-banner {
+	margin: 0.5rem var(--popup-padding) 0;
+	padding: 0.625rem 0.75rem;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-s);
+	background: var(--background-secondary);
+	color: var(--text-normal);
+	font-size: var(--font-ui-smaller);
+	line-height: 1.35;
+
+	&[hidden] {
+		display: none;
+	}
+
+	.clip-feedback-title {
+		font-weight: 600;
+		margin-bottom: 0.15rem;
+	}
+
+	.clip-feedback-detail {
+		color: var(--text-muted);
+		word-break: break-word;
+	}
+
+	.clip-feedback-actions {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.4rem;
+		margin-top: 0.55rem;
+
+		button {
+			height: 1.75rem;
+			padding: 0 0.6rem;
+			font-size: var(--font-ui-smaller);
+		}
+	}
+
+	&.is-success {
+		border-color: rgba(var(--color-green-rgb), 0.35);
+		background: rgba(var(--color-green-rgb), 0.1);
+	}
+
+	&.is-warning {
+		border-color: rgba(var(--color-yellow-rgb), 0.45);
+		background: rgba(var(--color-yellow-rgb), 0.12);
+	}
+}
+
 .clipper {
 	display: flex;
 	flex-direction: column;
