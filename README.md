@@ -1,2 +1,0 @@
-# obsidian-web-clipper
-Backup.
